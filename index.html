@@ -469,7 +469,7 @@ const GRIDS = [
   {n:'Bloom',   id:9,  min:2,  max:14, dens:8,  v:.80, pix:0, style:1},
   {n:'Rays',    id:6,  min:4,  max:48, dens:14, v:.50, pix:0, style:1},
   {n:'Petal',   id:17, min:3,  max:8,  dens:5,  v:.40, pix:0, style:0},
-  {n:'Horizon', id:19, min:2,  max:7,  dens:4,  v:.40, pix:0, style:0}
+  {n:'Horizon', id:19, min:1,  max:12, dens:5,  v:.45, pix:0, style:0}
 ];
 const STYLES = ['Flow','Wave','Glitch','Pulse'];
 const SIZES = [{n:'9:16',w:1080,h:1920},{n:'1:1',w:1080,h:1080},{n:'16:9',w:1920,h:1080},{n:'5:7',w:1080,h:1512}];
@@ -656,28 +656,34 @@ void main(){
     col = tone(clamp(g, 0.0, 1.0));
     col = mix(col, tone(0.0), exp(-v/0.022)*0.8*smoothstep(0.04, 0.3, r));
     col += mix(tone(0.85), vec3(1.0), 0.2)*exp(-(1.0 - v)/0.07)*smoothstep(0.25, 0.9, r)*(0.06 + 0.4*bf.z);
-  } else if (u_grid == 19) {               /* Horizon: a still arc; light rises through the atmosphere in bands */
+  } else if (u_grid == 19) {               /* Horizon: an arc of light; Shape goes from a flat calm line to a curved, rippling planet rim,
+                                              Amount from a few broad layers of light to many fine strata */
     vec2 p = (uv - 0.5)*vec2(asp, 1.0); p.y = -p.y;
     float ph = TAU*t*L; vec3 bf = u_band, bs = u_bandS;
-    float R = (1.25 + 1.2*u_var)*max(1.0, asp*1.4)*(1.0 + 0.05*sin(ph + 1.3) + 0.04*bs.y);   /* curvature breathes */
-    float crest = -0.08 + 0.035*sin(ph) + 0.015*sin(2.0*ph + 0.7) + 0.05*bs.x + 0.025*bf.x;      /* rises and falls; lifts on the beat */
-    vec2 C = vec2(0.012*sin(ph + 2.1), crest - R);
+    float vo = u_var*u_var*(3.0 - 2.0*u_var);                                 /* eased: the middle of the slider is the middle of the look */
+    float tilt = (h11(41.0) - 0.5)*0.22*(0.3 + vo);                            /* each variation leans the horizon a little differently */
+    p = mat2(cos(tilt), -sin(tilt), sin(tilt), cos(tilt))*p;
+    float R = mix(9.0, 0.6, pow(vo, 0.7))*max(1.0, asp*1.4)*(1.0 + 0.05*sin(ph + 1.3) + 0.04*bs.y);   /* flat -> strongly domed */
+    float crest = mix(0.02, -0.12, vo) + 0.035*sin(ph) + 0.015*sin(2.0*ph + 0.7) + 0.05*bs.x + 0.025*bf.x;
+    vec2 C = vec2((h11(43.0) - 0.5)*0.5*asp*vo + 0.012*sin(ph + 2.1), crest - R);
     vec2 dq = p - C; float s = length(dq) - R;                              /* > 0 above the rim */
     float along = atan(dq.x, dq.y)*R;
-    s += (0.006 + 0.014*bs.y + 0.012*bf.x)*sin(along*4.5 - 2.0*ph) + 0.004*sin(along*9.0 + 3.0*ph);   /* a slow wave travels along the line */
-    /* the atmosphere is alive: several layers of light travel vertically at their own speeds (some rising, some sinking),
-       they lean and shift sideways, and from time to time a flood of light climbs from the rim; sound drives all of it */
+    float wf = 3.0 + floor(h11(47.0)*4.0);
+    s += (0.002 + 0.055*vo*vo + 0.014*bs.y + 0.012*bf.x)*sin(along*wf - 2.0*ph)                       /* the line ripples more as it turns organic */
+       + (0.001 + 0.022*vo)*sin(along*(wf*2.3) + 3.0*ph + 1.7);
     float xw = p.x/max(asp, 0.5);
     float g;
     if (s > 0.0) {
       g = 0.85*exp(-s/(0.2 + 0.1*bs.x));                                    /* the halo; bass broadens it */
-      for (int k = 0; k < 8; k++) {
+      float spc = 1.25/N;                                                     /* bands share the sky: few are broad, many are fine */
+      for (int k = 0; k < 12; k++) {
         float fk = float(k); if (fk >= N) break;
         float hk = h11(fk + 5.0), sp = (1.0 + floor(hk*3.0))*(mod(fk, 3.0) == 2.0 ? -1.0 : 1.0);
-        float lean = (0.06 + 0.05*bs.y)*sin(xw*(2.0 + fk) + ph*(1.0 + mod(fk, 2.0)) + fk*1.9);   /* bands tilt and shift sideways */
-        float m = fract(fk/N + sp*t*L + 0.08*bs.y*fk/N + hk);
-        float sk = m*(1.0 + 0.2*u_var) + lean;
-        g += (0.16 + 0.1*bs.y)*sin(3.14159*m)*exp(-sq((s - sk)/(0.05 + 0.04*u_var + 0.03*hk)));
+        float lean = (0.004 + 0.15*vo + 0.05*bs.y)*(1.2/sqrt(N + 0.5))*sin(xw*(1.4 + 0.25*fk*(0.4 + vo)) + ph*(1.0 + mod(fk, 2.0)) + fk*1.9);   /* straight when regular, curling when organic */
+        float m = fract(fk/N + sp*t*L*mix(0.5, 1.0, vo) + 0.08*bs.y*fk/N + hk*vo);
+        float sk = m*1.3 + lean;
+        float wd = spc*mix(0.16, 0.42, vo)*(1.0 + vo*(hk - 0.5));               /* regular: even and crisp; organic: varied and soft */
+        g += (0.3 + 0.12*bs.y)*mix(1.0, 0.75, vo)*sin(3.14159*m)*exp(-sq((s - sk)/wd));
       }
       float fp = fract(t*L*2.0), front = fp*1.3 + 0.3*bs.x;                  /* a flood of light climbs from the rim */
       g += (0.22 + 0.4*bs.x)*smoothstep(front + 0.12, front - 0.05, s)*smoothstep(front - 0.35, front, s)*(1.0 - fp)
@@ -685,7 +691,7 @@ void main(){
       g += 0.16*bf.x*exp(-s/0.12);                                            /* the beat flares the air above the line */
     } else {
       float sd = -s;
-      float m1 = fract(sd*1.4 - t*L*2.0 + 0.1*sin(xw*2.5 + ph)), m2 = fract(sd*2.6 + t*L + 0.06*sin(xw*4.0 - 2.0*ph));
+      float m1 = fract(sd*(0.5 + 0.45*N) - t*L*2.0 + 0.16*vo*sin(xw*2.5 + ph)), m2 = fract(sd*(1.0 + 0.8*N) + t*L + 0.1*vo*sin(xw*4.0 - 2.0*ph));
       g = 0.04 + 0.62*exp(-sd/(0.045 + 0.02*bs.x)) + 1.6*smoothstep(0.2, 0.55, sd)
         + (0.12 + 0.12*bs.y)*exp(-sq((m1 - 0.5)/0.16))*smoothstep(0.04, 0.2, sd)          /* bands sink away from the rim */
         + (0.07 + 0.1*bf.z)*exp(-sq((m2 - 0.5)/0.1))*smoothstep(0.08, 0.3, sd)             /* a faster counter-current */
