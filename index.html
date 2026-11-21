@@ -284,6 +284,10 @@ body.np-out #np{opacity:0;transform:translate(-50%,-44px) scale(.7)}
 .interval{margin:0 0 12px}
 .ivtop{display:flex;justify-content:space-between;gap:10px;font-size:13px;margin-bottom:9px}
 #ivLen{font:400 12px/1.3 var(--font-mono);color:var(--ink-dim)}
+#sndLine{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:2px 0 8px;min-height:20px}
+#sndNote{font-size:12.5px;line-height:1.35;color:var(--ink-dim);flex:1 1 180px}
+#sndLine.warn #sndNote{color:var(--ink)}
+#addSnd{padding:4px 0}
 #ivBar{position:relative;height:8px;border-radius:4px;background:var(--track)}
 #ivSel{position:absolute;top:0;bottom:0;left:0;width:100%;border-radius:4px;background:var(--ink)}
 #ivHead{position:absolute;top:-4px;width:2px;height:16px;border-radius:1px;background:#ffcf6a;left:0;display:none}
@@ -385,6 +389,7 @@ body.panel-open #hint{opacity:0;transition:opacity .2s}
     </div>
     <div id="capVideo" hidden>
       <div class="interval"><div class="ivtop"><span id="ivLabel"></span><span id="ivLen"></span></div><div id="ivBar"><i id="ivSel"></i><b id="ivHead"></b></div></div>
+      <div id="sndLine"><span id="sndNote"></span><button class="linkbtn" id="addSnd" type="button" hidden><svg viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z"/></svg>Add the sample track</button></div>
       <div id="songOpts" hidden>
         <div class="chips" id="fromChips"></div>
         <div class="chips" id="lenChips"></div>
@@ -1703,6 +1708,31 @@ function exInfo(){
     $('#ivLabel').textContent = 'Seamless loop'; $('#ivLen').textContent = state.loop + ' s · silent';
     $('#ivSel').style.left = '0%'; $('#ivSel').style.width = '100%';
   }
+  try { sndInfo(song); } catch (e) { /* still loading */ }
+}
+function sndInfo(song){
+  const line = $('#sndLine'), sn = $('#sndNote'), add = $('#addSnd'); if (!line) return;
+  let busy = false; try { busy = sampleBusy; } catch (e) {}
+  add.hidden = song || busy;
+  line.classList.toggle('warn', !song);
+  if (!song) sn.textContent = A.kind === 'demo' ? 'The live beat can’t be recorded. Add the sample track or your own song for a video with sound.' : 'No sound is playing, so this will be a silent loop.';
+  else if (state.exSound !== 0) sn.textContent = 'Silent video (you chose Silent).';
+  else sn.textContent = (window.AUDIO_FMT || AUDIO_FMT || {}).kind === 'pcm' ? 'With sound. This browser can’t make AAC, so it saves a .mov with full-quality sound (plays in Photos, QuickTime and VLC).' : 'With sound.';
+}
+/* which sound format this browser can encode: AAC in MP4 everywhere it exists, otherwise uncompressed sound in a .mov (always possible) */
+var AUDIO_FMT = {kind:'aac', checked:false};
+async function checkAudioFmt(){
+  if (AUDIO_FMT.checked) return AUDIO_FMT; AUDIO_FMT.checked = true;
+  let ok = false;
+  try {
+    if (typeof AudioEncoder !== 'undefined' && typeof AudioData !== 'undefined'){
+      const sr = (A.buf && A.buf.sampleRate) || 48000;
+      const r = await AudioEncoder.isConfigSupported({codec:'mp4a.40.2', sampleRate: sr, numberOfChannels: 2, bitrate: 192000, aac:{format:'aac'}});
+      ok = !!(r && r.supported);
+    }
+  } catch (e) { ok = false; }
+  AUDIO_FMT.kind = ok ? 'aac' : 'pcm';
+  return AUDIO_FMT;
 }
 const PV = {on:false, t:0, song:false, wasPlaying:false, wasPos:0};
 function capStep(k){
@@ -1711,6 +1741,7 @@ function capStep(k){
   $('#capTitle').textContent = k === 'video' ? 'Short video' : 'Keep this look';
   CLIP.start = k === 'video' && isSong() ? Math.min(Math.max(0, pos()), Math.max(0, A.buf.duration - 1)) : null;   /* the interval is fixed while you decide */
   exInfo();
+  if (k === 'video') checkAudioFmt().then(exInfo);
 }
 function stopPreview(){
   if (!PV.on) return;
@@ -1731,6 +1762,12 @@ $('#pvBtn').addEventListener('click', e => {
   }
 });
 $('#vidBtn').addEventListener('click', e => { e.stopPropagation(); capStep('video'); });
+$('#addSnd').addEventListener('click', async e => {
+  e.stopPropagation(); $('#addSnd').hidden = true; $('#sndNote').textContent = 'Starting the sample track…';
+  await startSample();
+  if (openKey !== 'capture') openPanel('capture');
+  capStep('video');
+});
 $('#capBack').addEventListener('click', e => { e.stopPropagation(); capStep('home'); });
 /* share this look: the visual settings travel in the link; sound does not */
 const b64u = s => btoa(unescape(encodeURIComponent(s))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -1854,7 +1891,7 @@ async function deliver(filename, blob){
   document.head.appendChild(st); })();
 function showResult(filename, blob){
   const old = document.getElementById('result'); if (old) old.remove();
-  const isVid = /\.mp4$/i.test(filename), type = blob.type || (isVid ? 'video/mp4' : 'image/png');
+  const isVid = /\.(mp4|mov)$/i.test(filename), type = blob.type || (isVid ? 'video/mp4' : 'image/png');
   const url = URL.createObjectURL(blob);
   const m = document.createElement('div'); m.id = 'result';
   const card = document.createElement('div'); card.className = 'rcard glass'; m.appendChild(card);
@@ -1940,14 +1977,16 @@ function muxMP4(samples, avcC, w, h, fps, audio){
   const dsc = (tag, ...parts) => { const body = cat(parts.map(U8)); return cat([Uint8Array.from([tag, ...len4(body.length)]), body]); };
   const now = Math.floor(Date.now()/1000) + 2082844800;
   const matrix = [...u32(0x10000), ...u32(0), ...u32(0), ...u32(0), ...u32(0x10000), ...u32(0), ...u32(0), ...u32(0), ...u32(0x40000000)];
-  const ftyp = box('ftyp', str('isom'), u32(0x200), str('isom'), str('iso2'), str('avc1'), str('mp41'));
+  const ftyp = audio && audio.kind === 'pcm' ? box('ftyp', str('qt  '), u32(0x200), str('qt  ')) : box('ftyp', str('isom'), u32(0x200), str('isom'), str('iso2'), str('avc1'), str('mp41'));
   const keys = []; samples.forEach((s, i) => { if (s.key) keys.push(i + 1); });
   const sizes = samples.map(s => s.data.length);
   const total = sizes.reduce((a, b) => a + b, 0);
 
   /* audio track pieces (optional) */
   let aTs = 0, aDur = 0, aRuns = [], aSizes = [], aTotal = 0, aMovDur = 0;
-  if (audio){
+  if (audio && audio.kind === 'pcm'){
+    aTs = audio.sr; aDur = audio.frames; aTotal = audio.data.length; aMovDur = Math.round(aDur/aTs*TS);
+  } else if (audio){
     aTs = audio.kind === 'opus' ? 48000 : audio.sr;
     audio.samples.forEach(s => {
       const d = Math.max(1, Math.round(s.dur*aTs/1e6)); aDur += d; aSizes.push(s.data.length); aTotal += s.data.length;
@@ -1957,7 +1996,9 @@ function muxMP4(samples, avcC, w, h, fps, audio){
   }
   const audioTrak = aOff => {
     let cfg;
-    if (audio.kind === 'opus'){
+    const isPcm = audio.kind === 'pcm';
+    if (isPcm) cfg = new Uint8Array(0);
+    else if (audio.kind === 'opus'){
       let d = audio.desc;
       if (!d || d.length < 19) d = Uint8Array.from([...str('OpusHead'), 1, audio.ch, 56, 1, ...[audio.sr & 255, (audio.sr >> 8) & 255, (audio.sr >> 16) & 255, (audio.sr >> 24) & 255], 0, 0, 0]);
       const fam = d[18], pre = d[10] | (d[11] << 8), rate = ((d[12] | (d[13] << 8) | (d[14] << 16) | (d[15] << 24)) >>> 0), gain = (d[16] | (d[17] << 8)) & 0xffff;
@@ -1965,7 +2006,7 @@ function muxMP4(samples, avcC, w, h, fps, audio){
     } else {
       cfg = box('esds', zeros(4), dsc(3, [0, 2, 0], dsc(4, [0x40, 0x15, 0, 0, 0], u32(256000), u32(192000), dsc(5, audio.desc)), dsc(6, [2])));
     }
-    const entry = box(audio.kind === 'opus' ? 'Opus' : 'mp4a', zeros(6), u16(1), zeros(8), u16(audio.ch), u16(16), u16(0), u16(0), u32(aTs*65536), cfg);
+    const entry = box(isPcm ? 'sowt' : audio.kind === 'opus' ? 'Opus' : 'mp4a', zeros(6), u16(1), zeros(8), u16(audio.ch), u16(16), u16(0), u16(0), u32(aTs*65536), cfg);
     return box('trak',
       box('tkhd', [0, 0, 0, 3], u32(now), u32(now), u32(2), u32(0), u32(aMovDur), zeros(8), u16(0), u16(0), u16(0x100), u16(0), matrix, u32(0), u32(0)),
       box('mdia',
@@ -1976,9 +2017,9 @@ function muxMP4(samples, avcC, w, h, fps, audio){
           box('dinf', box('dref', zeros(4), u32(1), box('url ', [0, 0, 0, 1]))),
           box('stbl',
             box('stsd', zeros(4), u32(1), entry),
-            box('stts', zeros(4), u32(aRuns.length), aRuns.flatMap(r => [...u32(r[0]), ...u32(r[1])])),
-            box('stsc', zeros(4), u32(1), u32(1), u32(audio.samples.length), u32(1)),
-            box('stsz', zeros(4), u32(0), u32(audio.samples.length), aSizes.flatMap(u32)),
+            isPcm ? box('stts', zeros(4), u32(1), u32(audio.frames), u32(1)) : box('stts', zeros(4), u32(aRuns.length), aRuns.flatMap(r => [...u32(r[0]), ...u32(r[1])])),
+            box('stsc', zeros(4), u32(1), u32(1), u32(isPcm ? audio.frames : audio.samples.length), u32(1)),
+            isPcm ? box('stsz', zeros(4), u32(audio.ch*2), u32(audio.frames)) : box('stsz', zeros(4), u32(0), u32(audio.samples.length), aSizes.flatMap(u32)),
             box('stco', zeros(4), u32(1), u32(aOff))))));
   };
   const videoTrak = off => box('trak',
@@ -2004,7 +2045,8 @@ function muxMP4(samples, avcC, w, h, fps, audio){
   const base = ftyp.length + moovLen + 8;
   const moov = buildMoov(base, base + total);
   const mdatHead = Uint8Array.from([...u32(total + aTotal + 8), ...str('mdat')]);
-  return new Blob([ftyp, moov, mdatHead, ...samples.map(s => s.data), ...(audio ? audio.samples.map(s => s.data) : [])], {type:'video/mp4'});
+  const isMov = audio && audio.kind === 'pcm';
+  return new Blob([ftyp, moov, mdatHead, ...samples.map(s => s.data), ...(isMov ? [audio.data] : audio ? audio.samples.map(s => s.data) : [])], {type: isMov ? 'video/quicktime' : 'video/mp4'});
 }
 
 let exporting = false;
@@ -2089,17 +2131,19 @@ async function exportSongClip(){
     await ensureFont();
     const codec = await pickCodec(s.w, s.h, fps, bitrate);
     if (!codec) throw new Error('This browser cannot encode ' + s.w + '×' + s.h + ' video. Try a lower resolution.');
-    /* pick an audio codec this browser can encode: AAC first (plays everywhere), then Opus */
-    let acfg = null;
-    if (wantAudio && typeof AudioEncoder !== 'undefined' && typeof AudioData !== 'undefined'){
+    /* sound: AAC in MP4 where the browser can encode it (plays everywhere); otherwise the exact sound, uncompressed, in a .mov.
+       Opus is not used: Photos, QuickTime and most social apps play it silently. */
+    let acfg = null, pcm = false;
+    if (wantAudio){
       const sr = A.buf.sampleRate, ch = Math.min(2, A.ch.length);
-      for (const [name, kind, extra] of [['mp4a.40.2', 'aac', {aac: {format: 'aac'}}], ['opus', 'opus', {}]]){
+      if (typeof AudioEncoder !== 'undefined' && typeof AudioData !== 'undefined'){
         try {
-          const cfg = Object.assign({codec: name, sampleRate: sr, numberOfChannels: ch, bitrate: 192000}, extra);
+          const cfg = {codec: 'mp4a.40.2', sampleRate: sr, numberOfChannels: ch, bitrate: 192000, aac: {format: 'aac'}};
           const r = await AudioEncoder.isConfigSupported(cfg);
-          if (r.supported){ acfg = {cfg, kind, sr, ch}; break; }
-        } catch (e) { /* try next */ }
+          if (r.supported) acfg = {cfg, kind: 'aac', sr, ch};
+        } catch (e) { /* fall back */ }
       }
+      if (!acfg) pcm = true;
     }
     const cv = document.createElement('canvas'); cv.width = s.w; cv.height = s.h;
     const r = createRenderer(cv, true);
@@ -2131,14 +2175,14 @@ async function exportSongClip(){
       compose(octx, cv, eff, ph); const vf = new VideoFrame(out, {timestamp: Math.round(i*1e6/fps), duration: Math.round(1e6/fps)});
       enc.encode(vf, {keyFrame: i % keyEvery === 0}); vf.close();
       while (enc.encodeQueueSize > 8) await sleep(2);
-      if (i % 6 === 0){ setProg(i/frames*(acfg ? .8 : .92), 'Rendering ' + Math.round(i/frames*100) + '%'); await sleep(0); }
+      if (i % 6 === 0){ setProg(i/frames*(acfg || pcm ? .8 : .92), 'Rendering ' + Math.round(i/frames*100) + '%'); await sleep(0); }
     }
     await enc.flush(); enc.close();
     if (failure) throw failure;
     if (!avcC || samples.length !== frames) throw new Error('Encoder returned ' + samples.length + ' of ' + frames + ' frames');
 
     let audio = null, note = '';
-    if (acfg){
+    const tryAac = async () => {
       setProg(.82, 'Encoding sound…');
       const asamples = []; let adesc = null, afail = null;
       const aenc = new AudioEncoder({
@@ -2162,14 +2206,27 @@ async function exportSongClip(){
       }
       await aenc.flush(); aenc.close();
       if (afail) throw afail;
-      audio = {kind: acfg.kind, desc: adesc, sr: acfg.sr, ch: acfg.ch, samples: asamples};
-      note = ' · ' + (acfg.kind === 'aac' ? 'AAC' : 'Opus') + ' sound';
-    } else if (wantAudio){ note = ' · this browser can’t encode sound, saved without'; }
-    else note = ' · no sound';
-    setProg(.97, 'Packaging MP4…');
+      if (!asamples.length || !adesc) throw new Error('no AAC output');
+      return {kind: 'aac', desc: adesc, sr: acfg.sr, ch: acfg.ch, samples: asamples};
+    };
+    const makePcm = () => {                                    /* 16-bit little-endian, interleaved: the "sowt" sound QuickTime reads */
+      let sr = A.buf.sampleRate; const ch = Math.min(2, A.ch.length), from = Math.round(cp.start*sr), totalS = Math.round(frames/fps*sr);
+      const data = new Uint8Array(totalS*ch*2), dv = new DataView(data.buffer);
+      for (let q = 0, k = 0; q < totalS; q++) for (let c = 0; c < ch; c++, k += 2){
+        const v = Math.max(-1, Math.min(1, A.ch[c][from + q] || 0)); dv.setInt16(k, v < 0 ? v*32768 : v*32767, true);
+      }
+      return {kind: 'pcm', sr, ch, frames: totalS, data};
+    };
+    if (acfg){
+      try { audio = await tryAac(); note = ' · AAC sound'; }
+      catch (e){ console.warn('AAC failed, using uncompressed sound', e); pcm = true; }
+    }
+    if (pcm){ setProg(.9, 'Adding sound…'); audio = makePcm(); note = ' · with sound (.mov)'; }
+    if (!wantAudio) note = ' · no sound';
+    setProg(.97, 'Packaging video…');
     const blob = muxMP4(samples, avcC, s.w, s.h, fps, audio);
     setProg(1, (blob.size/1048576).toFixed(1) + ' MB · ' + s.w + '×' + s.h + ' · ' + fps + ' fps' + note);
-    await deliver(stamp() + '.mp4', blob);
+    await deliver(stamp() + (audio && audio.kind === 'pcm' ? '.mov' : '.mp4'), blob);
   } catch (e){
     console.error(e);
     $('#status').textContent = 'Export failed: ' + (e && e.message ? e.message : e);
