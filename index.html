@@ -1702,7 +1702,7 @@ function clipPlan(){
 function exInfo(){
   const s = exSize(), song = isSong();
   $('#songOpts').hidden = !song;
-  $('#exInfo').textContent = SIZES[state.size].n + ' · ' + s.w + '×' + s.h + ' · ' + state.fps + ' fps';
+  $('#exInfo').textContent = SIZES[state.size].n + ' · ' + s.w + '×' + s.h + ' · ' + state.fps + ' fps · v41';
   if (song){
     const cp = clipPlan();
     $('#vidSub').textContent = Math.round(cp.len) + ' s of ' + (A.sample ? 'the sample' : 'your song');
@@ -2059,16 +2059,27 @@ let exporting = false;
 function setBusy(b){ exporting = b; $('#pngBtn').disabled = b; $('#mp4Btn').disabled = b; $('#vidBtn').disabled = b; $('#pvBtn').disabled = b; $('#prog').hidden = !b; }
 function setProg(f, msg){ $('#prog i').style.width = Math.round(f*100) + '%'; $('#status').textContent = msg || ''; }
 
+/* Hardware H.264 encoders (Apple's in particular) let quality drift from frame to frame on smooth gradients:
+   the picture softens and darkens, then snaps back a few times a second, which reads as flicker. So the
+   encoder is asked for a steady quality per frame (quantizer mode), and the software encoder is preferred,
+   which keeps every frame alike; the hardware path stays as the last resort. */
+const ENC_Q = 16;                                                  /* H.264 quantizer: lower is cleaner (0-51) */
 async function pickCodec(w, h, fps, bitrate){
   const list = (w*h > 2.1e6 ? ['avc1.640034', 'avc1.640033'] : []).concat(['avc1.640032', 'avc1.64002a', 'avc1.640028', 'avc1.4d0028', 'avc1.42001f']);
-  for (const codec of list){
+  const modes = [{hardwareAcceleration:'prefer-software', bitrateMode:'quantizer'}, {hardwareAcceleration:'prefer-software'},
+                 {bitrateMode:'quantizer'}, {}];
+  for (const extra of modes) for (const codec of list){
     try {
-      const r = await VideoEncoder.isConfigSupported({codec, width:w, height:h, bitrate, framerate:fps, avc:{format:'avc'}});
-      if (r.supported) return codec;
+      const cfg = Object.assign({codec, width:w, height:h, bitrate, framerate:fps, avc:{format:'avc'}}, extra);
+      if (extra.bitrateMode === 'quantizer') delete cfg.bitrate;
+      const r = await VideoEncoder.isConfigSupported(cfg);
+      if (r.supported) return {codec, cfg, q: extra.bitrateMode === 'quantizer'};
     } catch (e) { /* try next */ }
   }
   return null;
 }
+/* a frame's encode options: a key frame every second keeps any drift short, and the quantizer fixes the quality */
+const frameOpts = (pick, i, fps) => pick.q ? {keyFrame: i % fps === 0, avc: {quantizer: ENC_Q}} : {keyFrame: i % fps === 0};
 
 async function exportMP4(){
   if (exporting) return;
@@ -2081,7 +2092,7 @@ async function exportMP4(){
   setBusy(true); setProg(0, 'Preparing…');
   try {
     await ensureFont();
-    const codec = await pickCodec(s.w, s.h, fps, bitrate);
+    const pick = await pickCodec(s.w, s.h, fps, bitrate), codec = pick && pick.codec;
     if (!codec) throw new Error('This browser cannot encode ' + s.w + '×' + s.h + ' video. Try a lower resolution.');
     const cv = document.createElement('canvas'); cv.width = s.w; cv.height = s.h;
     const r = createRenderer(cv, true);
@@ -2099,13 +2110,13 @@ async function exportMP4(){
       },
       error: e => { failure = e; }
     });
-    enc.configure({codec, width:s.w, height:s.h, bitrate, framerate:fps, avc:{format:'avc'}, latencyMode:'quality'});
+    enc.configure(Object.assign({latencyMode:'quality'}, pick.cfg));
     const keyEvery = fps*2;
     for (let i = 0; i < frames; i++){
       if (failure) throw failure;
       r.draw(state, i/frames);          /* i/frames: the last frame sits one step before the first, so it loops */
       compose(octx, cv, state, i/frames); const vf = new VideoFrame(out, {timestamp: Math.round(i*1e6/fps), duration: Math.round(1e6/fps)});
-      enc.encode(vf, {keyFrame: i % keyEvery === 0}); vf.close();
+      enc.encode(vf, frameOpts(pick, i, fps)); vf.close();
       while (enc.encodeQueueSize > 8) await sleep(2);
       if (i % 6 === 0){ setProg(i/frames*0.92, 'Rendering ' + Math.round(i/frames*100) + '%'); await sleep(0); }
     }
@@ -2135,7 +2146,7 @@ async function exportSongClip(){
   setBusy(true); setProg(0, 'Preparing…');
   try {
     await ensureFont();
-    const codec = await pickCodec(s.w, s.h, fps, bitrate);
+    const pick = await pickCodec(s.w, s.h, fps, bitrate), codec = pick && pick.codec;
     if (!codec) throw new Error('This browser cannot encode ' + s.w + '×' + s.h + ' video. Try a lower resolution.');
     /* sound: AAC in MP4 where the browser can encode it (plays everywhere); otherwise the exact sound, uncompressed, in a .mov.
        Opus is not used: Photos, QuickTime and most social apps play it silently. */
@@ -2167,7 +2178,7 @@ async function exportSongClip(){
       },
       error: e => { failure = e; }
     });
-    enc.configure({codec, width: s.w, height: s.h, bitrate, framerate: fps, avc: {format: 'avc'}, latencyMode: 'quality'});
+    enc.configure(Object.assign({latencyMode:'quality'}, pick.cfg));
 
     const AS = newAS(), dtf = 1/fps; let ph = 0;
     for (let k = Math.floor(Math.min(cp.start, 1)*30); k > 0; k--){ const t = cp.start - k/30; stepAS(AS, pcmBandDb(t), 1/30, t*1000, true); }   /* settle the level tracking before frame 0 */
@@ -2179,7 +2190,7 @@ async function exportSongClip(){
       ph = (ph + dtf/state.loop*(1 + eff.boost)) % 1;                /* a song clip always plays, whatever the pause button says */
       r.draw(eff, ph);
       compose(octx, cv, eff, ph); const vf = new VideoFrame(out, {timestamp: Math.round(i*1e6/fps), duration: Math.round(1e6/fps)});
-      enc.encode(vf, {keyFrame: i % keyEvery === 0}); vf.close();
+      enc.encode(vf, frameOpts(pick, i, fps)); vf.close();
       while (enc.encodeQueueSize > 8) await sleep(2);
       if (i % 6 === 0){ setProg(i/frames*(acfg || pcm ? .8 : .92), 'Rendering ' + Math.round(i/frames*100) + '%'); await sleep(0); }
     }
